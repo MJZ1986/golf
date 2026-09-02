@@ -1,0 +1,54 @@
+name: Fetch Kaggriculture public artifacts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fetch-kaggriculture.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch public artifacts
+        shell: bash
+        run: |
+          set -u
+          mkdir -p artifacts
+          UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36'
+
+          fetch_optional() {
+            local url="$1"
+            local out="$2"
+            echo "Fetching $url"
+            if curl --retry 3 --retry-all-errors --connect-timeout 20 --max-time 180 -A "$UA" -fL "$url" -o "$out"; then
+              echo "OK $(wc -c < "$out") bytes $out"
+            else
+              echo "FAILED $url" | tee -a artifacts/fetch_failures.txt
+              rm -f "$out"
+            fi
+          }
+
+          # Current public 3034.8 Roman Rozen notebook: try both output and source APIs.
+          fetch_optional 'https://www.kaggle.com/api/v1/kernels/output/romanrozen/strong-barnyard-economist' 'artifacts/roman-barnyard-v7-output.zip'
+          fetch_optional 'https://www.kaggle.com/api/v1/kernels/pull/romanrozen/strong-barnyard-economist' 'artifacts/roman-barnyard-v7-kernel.zip'
+
+          # Public, license-documented exact/reference agents from GitHub mirrors.
+          fetch_optional 'https://raw.githubusercontent.com/sota1111/kaggriculture-gpt/cfbe024a9a647f094923dfb94634ffcea14bc5c3/candidates/c95-high-score/agent.py' 'artifacts/c95-high-score-agent.py'
+          fetch_optional 'https://raw.githubusercontent.com/sota1111/kaggriculture-gpt/cfbe024a9a647f094923dfb94634ffcea14bc5c3/candidates/moon-counts-melons/agent.py' 'artifacts/moon-v102-agent.py'
+          fetch_optional 'https://raw.githubusercontent.com/Seyamalam/Kaggriculture/main/main.py' 'artifacts/seyamalam-v21-agent.py'
+          fetch_optional 'https://raw.githubusercontent.com/sota1111/kaggriculture-gpt/cfbe024a9a647f094923dfb94634ffcea14bc5c3/submission.tar.gz' 'artifacts/sota-incumbent-submission.tar.gz'
+
+          (cd artifacts && sha256sum * 2>/dev/null || true) > artifacts/SHA256SUMS.txt
+          find artifacts -maxdepth 2 -type f -printf '%P\t%s bytes\n' | sort | tee artifacts/MANIFEST.txt
+
+      - name: Upload transfer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaggriculture-public-artifacts
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 1
