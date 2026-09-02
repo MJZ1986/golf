@@ -1,0 +1,164 @@
+name: Kaggriculture Official-Engine Tournament
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/kaggriculture-tournament.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  tournament:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install exact engine
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'kaggle-environments==1.32.7'
+      - name: Acquire pinned public agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/sota1111/kaggriculture-gpt.git sota
+          cd sota
+          git checkout cfbe024a9a647f094923dfb94634ffcea14bc5c3
+          cd ..
+          curl --retry 3 --retry-all-errors -fL 'https://raw.githubusercontent.com/Seyamalam/Kaggriculture/main/main.py' -o sota/seyamalam-v21-agent.py
+          python -m compileall -q sota
+      - name: Run tournament
+        shell: bash
+        run: |
+          cat > /tmp/tournament.py <<'PY'
+          from __future__ import annotations
+          import json, math, os, statistics, traceback
+          from pathlib import Path
+          from kaggle_environments import make
+
+          ROOT = Path('sota')
+          requested = {
+              'c95': ROOT/'candidates/c95-high-score/agent.py',
+              'barnyard_v5': ROOT/'candidates/barnyard-economist-v5/agent.py',
+              'moon_v102': ROOT/'candidates/moon-counts-melons/agent.py',
+              'soil_v26h': ROOT/'candidates/soil-remembers-rain/agent.py',
+              'hamburger_v27': ROOT/'candidates/hamburger-v27/agent.py',
+              'v16_rc5': ROOT/'candidates/v16-rc5-portable/agent.py',
+              'strict_future': ROOT/'candidates/strict-future-meta-reset/agent.py',
+              'sota_main': ROOT/'main.py',
+              'seyamalam_v21': ROOT/'seyamalam-v21-agent.py',
+          }
+          agents = {k:v for k,v in requested.items() if v.is_file()}
+          missing = {k:str(v) for k,v in requested.items() if not v.is_file()}
+          print('AGENTS', {k:str(v) for k,v in agents.items()})
+          print('MISSING', missing)
+          seeds = [910001, 910002, 910003, 910004]
+          games=[]
+
+          def run_game(left_name, right_name, seed):
+              left, right = agents[left_name], agents[right_name]
+              env = make('kaggriculture', configuration={'seed': seed}, debug=True)
+              try:
+                  env.run([str(left.resolve()), str(right.resolve())])
+                  rewards=list(env.state[0].reward for _ in [0])
+                  # env.state is per-agent
+                  rewards=[env.state[0].reward, env.state[1].reward]
+                  statuses=[env.state[0].status, env.state[1].status]
+                  err=None
+              except Exception as e:
+                  rewards=[None,None]; statuses=['ERROR','ERROR']; err=repr(e)
+              return {'left':left_name,'right':right_name,'seed':seed,'rewards':rewards,'statuses':statuses,'error':err}
+
+          names=sorted(agents)
+          for i,a in enumerate(names):
+              for b in names[i+1:]:
+                  for seed in seeds:
+                      for left,right in [(a,b),(b,a)]:
+                          g=run_game(left,right,seed)
+                          games.append(g)
+                          print(json.dumps(g, sort_keys=True), flush=True)
+
+          # self-play stability
+          for a in names:
+              for seed in seeds:
+                  g=run_game(a,a,seed)
+                  g['self_play']=True
+                  games.append(g)
+                  print(json.dumps(g, sort_keys=True), flush=True)
+
+          stats={a:{'wins':0,'ties':0,'losses':0,'margins':[],'banks':[],'errors':0,'by_opp':{}} for a in names}
+          for g in games:
+              if g.get('self_play'): continue
+              l,r=g['left'],g['right']; rw=g['rewards']
+              if rw[0] is None or rw[1] is None or any(s!='DONE' for s in g['statuses']):
+                  stats[l]['errors']+=1; stats[r]['errors']+=1; continue
+              m=float(rw[0])-float(rw[1])
+              for who,opp,margin,bank in [(l,r,m,rw[0]),(r,l,-m,rw[1])]:
+                  s=stats[who]; s['margins'].append(margin); s['banks'].append(float(bank))
+                  bo=s['by_opp'].setdefault(opp,{'wins':0,'ties':0,'losses':0,'margins':[]})
+                  bo['margins'].append(margin)
+                  if margin>0: s['wins']+=1; bo['wins']+=1
+                  elif margin<0: s['losses']+=1; bo['losses']+=1
+                  else: s['ties']+=1; bo['ties']+=1
+
+          self_stats={a:{'banks':[],'seat_gaps':[],'errors':0} for a in names}
+          for g in games:
+              if not g.get('self_play'): continue
+              a=g['left']; rw=g['rewards']
+              if rw[0] is None or rw[1] is None or any(s!='DONE' for s in g['statuses']):
+                  self_stats[a]['errors']+=1; continue
+              self_stats[a]['banks'] += [float(rw[0]),float(rw[1])]
+              self_stats[a]['seat_gaps'].append(abs(float(rw[0])-float(rw[1])))
+
+          summary={}
+          for a,s in stats.items():
+              n=s['wins']+s['ties']+s['losses']
+              margins=sorted(s['margins'])
+              k=max(1,math.ceil(.2*len(margins))) if margins else 0
+              summary[a]={
+                  'w_t_l':[s['wins'],s['ties'],s['losses']],
+                  'win_rate':s['wins']/n if n else None,
+                  'mean_margin':statistics.mean(margins) if margins else None,
+                  'median_margin':statistics.median(margins) if margins else None,
+                  'worst_margin':min(margins) if margins else None,
+                  'cvar20':statistics.mean(margins[:k]) if margins else None,
+                  'mean_bank':statistics.mean(s['banks']) if s['banks'] else None,
+                  'errors':s['errors'],
+                  'by_opp':{o:{**v,'mean_margin':statistics.mean(v['margins'])} for o,v in s['by_opp'].items()},
+                  'self_play':{
+                      'mean_bank':statistics.mean(self_stats[a]['banks']) if self_stats[a]['banks'] else None,
+                      'floor':min(self_stats[a]['banks']) if self_stats[a]['banks'] else None,
+                      'mean_seat_gap':statistics.mean(self_stats[a]['seat_gaps']) if self_stats[a]['seat_gaps'] else None,
+                      'errors':self_stats[a]['errors'],
+                  }
+              }
+          ranking=sorted(summary, key=lambda a:(summary[a]['win_rate'] or -1, summary[a]['cvar20'] or -1), reverse=True)
+          out={'engine':'1.32.7','seeds':seeds,'agents':{k:str(v) for k,v in agents.items()},'missing':missing,'ranking':ranking,'summary':summary,'games':games}
+          Path('tournament-output').mkdir(exist_ok=True)
+          Path('tournament-output/results.json').write_text(json.dumps(out,indent=2),encoding='utf-8')
+          lines=['# Kaggriculture 1.32.7 tournament','',f'Games: {len(games)}','', '| Rank | Agent | W-T-L | Win rate | Mean margin | Worst | CVaR20 | Self floor |','|---:|---|---:|---:|---:|---:|---:|---:|']
+          for rank,a in enumerate(ranking,1):
+              s=summary[a]
+              lines.append(f"| {rank} | {a} | {s['w_t_l'][0]}-{s['w_t_l'][1]}-{s['w_t_l'][2]} | {100*s['win_rate']:.1f}% | {s['mean_margin']:.0f} | {s['worst_margin']:.0f} | {s['cvar20']:.0f} | {s['self_play']['floor']:.0f} |")
+          Path('tournament-output/REPORT.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          print('\n'.join(lines))
+          PY
+          python /tmp/tournament.py
+          cp sota/candidates/c95-high-score/agent.py tournament-output/c95.py
+          cp sota/candidates/barnyard-economist-v5/agent.py tournament-output/barnyard_v5.py
+          cp sota/candidates/moon-counts-melons/agent.py tournament-output/moon_v102.py
+          cp sota/candidates/soil-remembers-rain/agent.py tournament-output/soil_v26h.py
+          cp sota/main.py tournament-output/sota_main.py
+          cp sota/seyamalam-v21-agent.py tournament-output/seyamalam_v21.py
+          sha256sum tournament-output/*.py > tournament-output/SHA256SUMS.txt
+      - name: Upload tournament output
+        uses: actions/upload-artifact@v4
+        with:
+          name: kaggriculture-tournament-output
+          path: tournament-output/
+          retention-days: 1
