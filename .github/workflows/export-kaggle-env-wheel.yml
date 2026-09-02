@@ -1,0 +1,29 @@
+name: Export Kaggle Environments 1.32.7 wheel
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/export-kaggle-env-wheel.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download exact wheel
+        shell: bash
+        run: |
+          mkdir -p wheel
+          python -m pip download --no-deps --only-binary=:all: kaggle-environments==1.32.7 -d wheel
+          sha256sum wheel/* | tee wheel/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kaggle-environments-1.32.7-wheel
+          path: wheel/
+          retention-days: 1
