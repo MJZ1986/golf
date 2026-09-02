@@ -1,0 +1,116 @@
+name: Roman Barnyard V7 Exact Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/roman-v7-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install exact engine and downloader
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install 'kaggle-environments==1.32.7' 'kagglehub>=1.0.0'
+      - name: Acquire agents
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout https://github.com/sota1111/kaggriculture-gpt.git sota
+          cd sota && git checkout cfbe024a9a647f094923dfb94634ffcea14bc5c3 && cd ..
+          python - <<'PY'
+          import kagglehub
+          kagglehub.notebook_output_download('romanrozen/strong-barnyard-economist/versions/7', output_dir='roman', force_download=True)
+          PY
+          test -f roman/main.py
+          test "$(sha256sum roman/main.py | cut -d' ' -f1)" = '997e6bfc5234534e246e945bc61c87858ebf997ab85b0a5c9427dd4ed710f1b6'
+          curl --retry 3 --retry-all-errors -fL 'https://raw.githubusercontent.com/Seyamalam/Kaggriculture/main/main.py' -o sota/seyamalam-v21-agent.py
+          python -m compileall -q roman/main.py sota
+      - name: Run exact gate
+        shell: bash
+        run: |
+          cat > /tmp/roman_gate.py <<'PY'
+          from __future__ import annotations
+          import json, math, statistics
+          from pathlib import Path
+          from kaggle_environments import make
+
+          roman=Path('roman/main.py')
+          candidates={
+            'c95':Path('sota/candidates/c95-high-score/agent.py'),
+            'barnyard_v5':Path('sota/candidates/barnyard-economist-v5/agent.py'),
+            'moon_v102':Path('sota/candidates/moon-counts-melons/agent.py'),
+            'soil_v26h':Path('sota/candidates/soil-remembers-rain/agent.py'),
+            'hamburger_v27':Path('sota/candidates/hamburger-v27/agent.py'),
+            'v16_rc5':Path('sota/candidates/v16-rc5-portable/agent.py'),
+            'strict_future':Path('sota/candidates/strict-future-meta-reset/agent.py'),
+            'sota_main':Path('sota/main.py'),
+            'seyamalam_v21':Path('sota/seyamalam-v21-agent.py'),
+          }
+          candidates={k:v for k,v in candidates.items() if v.is_file()}
+          seeds=list(range(920001,920011))
+          rows=[]
+          def game(left,right,seed):
+            env=make('kaggriculture',configuration={'seed':seed},debug=True)
+            try:
+              env.run([str(left.resolve()),str(right.resolve())])
+              rw=[env.state[0].reward,env.state[1].reward]
+              st=[env.state[0].status,env.state[1].status]
+              err=None
+            except Exception as e:
+              rw=[None,None];st=['ERROR','ERROR'];err=repr(e)
+            return rw,st,err
+          for name,opp in candidates.items():
+            for seed in seeds:
+              for seat in [0,1]:
+                left,right=(roman,opp) if seat==0 else (opp,roman)
+                rw,st,err=game(left,right,seed)
+                roman_reward=rw[seat] if rw[0] is not None else None
+                opp_reward=rw[1-seat] if rw[0] is not None else None
+                margin=(float(roman_reward)-float(opp_reward)) if roman_reward is not None else None
+                row={'opponent':name,'seed':seed,'roman_seat':seat,'roman_reward':roman_reward,'opponent_reward':opp_reward,'margin':margin,'statuses':st,'error':err}
+                rows.append(row);print(json.dumps(row,sort_keys=True),flush=True)
+          # self-play
+          self_rows=[]
+          for seed in seeds:
+            rw,st,err=game(roman,roman,seed)
+            self_rows.append({'seed':seed,'rewards':rw,'statuses':st,'error':err})
+          by={}
+          for name in candidates:
+            rr=[r for r in rows if r['opponent']==name]
+            good=[r for r in rr if r['margin'] is not None and all(s=='DONE' for s in r['statuses'])]
+            margins=[r['margin'] for r in good]
+            wins=sum(m>0 for m in margins);ties=sum(m==0 for m in margins);losses=sum(m<0 for m in margins)
+            by[name]={'w_t_l':[wins,ties,losses],'win_rate':wins/len(margins) if margins else None,'mean_margin':statistics.mean(margins) if margins else None,'worst_margin':min(margins) if margins else None,'errors':len(rr)-len(good)}
+          allm=[r['margin'] for r in rows if r['margin'] is not None and all(s=='DONE' for s in r['statuses'])]
+          k=max(1,math.ceil(.2*len(allm)))
+          overall={'w_t_l':[sum(m>0 for m in allm),sum(m==0 for m in allm),sum(m<0 for m in allm)],'win_rate':sum(m>0 for m in allm)/len(allm),'mean_margin':statistics.mean(allm),'worst_margin':min(allm),'cvar20':statistics.mean(sorted(allm)[:k]),'errors':len(rows)-len(allm)}
+          selfbanks=[float(x) for r in self_rows if r['rewards'][0] is not None for x in r['rewards']]
+          selfstat={'mean_bank':statistics.mean(selfbanks),'floor':min(selfbanks),'mean_seat_gap':statistics.mean(abs(float(r['rewards'][0])-float(r['rewards'][1])) for r in self_rows if r['rewards'][0] is not None)}
+          out={'engine':'1.32.7','roman_sha256':'997e6bfc5234534e246e945bc61c87858ebf997ab85b0a5c9427dd4ed710f1b6','seeds':seeds,'overall':overall,'by_opponent':by,'self_play':selfstat,'rows':rows,'self_rows':self_rows}
+          Path('roman-gate').mkdir(exist_ok=True)
+          Path('roman-gate/results.json').write_text(json.dumps(out,indent=2),encoding='utf-8')
+          Path('roman-gate/main.py').write_bytes(roman.read_bytes())
+          lines=['# Roman Barnyard V7 exact gate','',f"Overall: {overall['w_t_l'][0]}-{overall['w_t_l'][1]}-{overall['w_t_l'][2]} ({100*overall['win_rate']:.1f}%)",f"Mean margin: {overall['mean_margin']:.0f}",f"Worst margin: {overall['worst_margin']:.0f}",f"CVaR20: {overall['cvar20']:.0f}",f"Self floor: {selfstat['floor']:.0f}",'','| Opponent | W-T-L | Win rate | Mean margin | Worst |','|---|---:|---:|---:|---:|']
+          for n,v in sorted(by.items(),key=lambda kv:kv[1]['win_rate'],reverse=True):
+            lines.append(f"| {n} | {v['w_t_l'][0]}-{v['w_t_l'][1]}-{v['w_t_l'][2]} | {100*v['win_rate']:.1f}% | {v['mean_margin']:.0f} | {v['worst_margin']:.0f} |")
+          Path('roman-gate/REPORT.md').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          print('\n'.join(lines))
+          PY
+          python /tmp/roman_gate.py
+          sha256sum roman-gate/main.py > roman-gate/SHA256SUMS.txt
+      - name: Upload gate results
+        uses: actions/upload-artifact@v4
+        with:
+          name: roman-v7-exact-gate
+          path: roman-gate/
+          retention-days: 1
