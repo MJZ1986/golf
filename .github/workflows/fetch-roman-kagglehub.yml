@@ -1,0 +1,52 @@
+name: Fetch Roman Barnyard V7 via KaggleHub
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/fetch-roman-kagglehub.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Download public notebook output
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet 'kagglehub>=1.0.0'
+          mkdir -p artifacts
+          python - <<'PY'
+          from pathlib import Path
+          import json, traceback
+          import kagglehub
+          out=Path('artifacts/roman-v7')
+          out.mkdir(parents=True,exist_ok=True)
+          attempts=[]
+          for handle in ['romanrozen/strong-barnyard-economist/versions/7','romanrozen/strong-barnyard-economist']:
+              try:
+                  p=kagglehub.notebook_output_download(handle, output_dir=str(out), force_download=True)
+                  attempts.append({'handle':handle,'ok':True,'path':str(p)})
+                  break
+              except Exception as e:
+                  attempts.append({'handle':handle,'ok':False,'error':repr(e),'traceback':traceback.format_exc()})
+          Path('artifacts/attempts.json').write_text(json.dumps(attempts,indent=2),encoding='utf-8')
+          files=list(out.rglob('*'))
+          if not any(p.is_file() for p in files):
+              raise SystemExit('No Roman output files downloaded')
+          PY
+          find artifacts -type f -printf '%P\t%s bytes\n' | sort | tee artifacts/MANIFEST.txt
+          find artifacts -type f -print0 | sort -z | xargs -0 sha256sum > artifacts/SHA256SUMS.txt
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: roman-barnyard-v7-kagglehub
+          path: artifacts/
+          retention-days: 1
