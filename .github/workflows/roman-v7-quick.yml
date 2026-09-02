@@ -1,0 +1,80 @@
+name: Roman Barnyard V7 Quick In-Process Gate
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/roman-v7-quick.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install and acquire
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet 'kaggle-environments==1.32.7' 'kagglehub>=1.0.0'
+          git clone --filter=blob:none --no-checkout https://github.com/sota1111/kaggriculture-gpt.git sota
+          cd sota && git checkout cfbe024a9a647f094923dfb94634ffcea14bc5c3 && cd ..
+          python - <<'PY'
+          import kagglehub
+          kagglehub.notebook_output_download('romanrozen/strong-barnyard-economist/versions/7', output_dir='roman', force_download=True)
+          PY
+      - name: Quick dynamic gate
+        shell: bash
+        run: |
+          cat > /tmp/quick.py <<'PY'
+          import importlib.util, json, statistics, hashlib
+          from pathlib import Path
+          from kaggle_environments import make
+          roman=Path('roman/main.py')
+          opponents={
+            'c95':Path('sota/candidates/c95-high-score/agent.py'),
+            'barnyard_v5':Path('sota/candidates/barnyard-economist-v5/agent.py'),
+            'moon_v102':Path('sota/candidates/moon-counts-melons/agent.py'),
+            'soil_v26h':Path('sota/candidates/soil-remembers-rain/agent.py'),
+            'hamburger_v27':Path('sota/candidates/hamburger-v27/agent.py'),
+            'sota_main':Path('sota/main.py'),
+          }
+          opponents={k:v for k,v in opponents.items() if v.is_file()}
+          def load(path,tag):
+            spec=importlib.util.spec_from_file_location(tag,path)
+            mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+            return mod.agent
+          rows=[]
+          for name,p in opponents.items():
+            for seed in [930001,930002,930003]:
+              for seat in [0,1]:
+                ra=load(roman,'r_'+hashlib.md5(f'{name}{seed}{seat}'.encode()).hexdigest())
+                oa=load(p,'o_'+hashlib.md5(f'{name}{seed}{seat}'.encode()).hexdigest())
+                agents=[ra,oa] if seat==0 else [oa,ra]
+                env=make('kaggriculture',configuration={'seed':seed},debug=True)
+                env.run(agents)
+                rw=[env.state[0].reward,env.state[1].reward]; st=[env.state[0].status,env.state[1].status]
+                rr=rw[seat];oo=rw[1-seat];m=float(rr)-float(oo)
+                rows.append({'opponent':name,'seed':seed,'seat':seat,'roman_reward':rr,'opponent_reward':oo,'margin':m,'statuses':st})
+          by={}
+          for name in opponents:
+            ms=[r['margin'] for r in rows if r['opponent']==name]
+            by[name]={'w_t_l':[sum(x>0 for x in ms),sum(x==0 for x in ms),sum(x<0 for x in ms)],'mean_margin':statistics.mean(ms),'worst_margin':min(ms)}
+          ms=[r['margin'] for r in rows]
+          out={'engine':'1.32.7','sha256':hashlib.sha256(roman.read_bytes()).hexdigest(),'overall':{'w_t_l':[sum(x>0 for x in ms),sum(x==0 for x in ms),sum(x<0 for x in ms)],'win_rate':sum(x>0 for x in ms)/len(ms),'mean_margin':statistics.mean(ms),'worst_margin':min(ms)},'by_opponent':by,'rows':rows}
+          Path('quick-out').mkdir()
+          Path('quick-out/results.json').write_text(json.dumps(out,indent=2))
+          Path('quick-out/main.py').write_bytes(roman.read_bytes())
+          print(json.dumps(out,indent=2))
+          PY
+          python /tmp/quick.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: roman-v7-quick-gate
+          path: quick-out/
+          retention-days: 1
