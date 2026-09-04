@@ -41,3 +41,5 @@ jobs:
           name: kaito-v27-public-output
           path: out/
           retention-days: 1
+
+# refreshed 2026-09-04 for independent live-meta evaluation
